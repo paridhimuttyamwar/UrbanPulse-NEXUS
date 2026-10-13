@@ -11,6 +11,11 @@ on:
         required: true
         type: boolean
         default: true
+      confirm_live_ingestion:
+        description: 'Explicit confirmation required for manual LIVE ingestion (ignored if dry_run=true)'
+        required: false
+        type: boolean
+        default: false
       force:
         description: 'Force execution (Bypass 45-minute recent batch cadence guard)'
         required: false
@@ -46,28 +51,63 @@ jobs:
       - name: Deployment Activation Guard Check
         id: activation_check
         run: |
-          # 1. If dry_run validation is requested, always allow execution (0 API calls, 0 DB writes)
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            echo "Dry-Run verification mode requested. Proceeding safely (0 external API calls, 0 DB writes)."
+          EVENT_NAME="${{ github.event_name }}"
+          DRY_RUN="${{ github.event.inputs.dry_run }}"
+          CONFIRM_LIVE="${{ github.event.inputs.confirm_live_ingestion }}"
+          ENABLE_CLOUD_INGESTION="${{ vars.ENABLE_CLOUD_INGESTION }}"
+
+          # 1. Scheduled Recurring Cron Ingestion Guard
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            if [ "$ENABLE_CLOUD_INGESTION" != "true" ]; then
+              echo "=========================================================================="
+              echo "RECURRING SCHEDULED INGESTION GUARD: PAUSED"
+              echo "Hourly scheduled ingestion is disabled because ENABLE_CLOUD_INGESTION != 'true'."
+              echo "To activate recurring hourly ingestion, configure repository variable:"
+              echo "  ENABLE_CLOUD_INGESTION = true"
+              echo "under Settings -> Secrets and variables -> Actions -> Variables."
+              echo "=========================================================================="
+              echo "paused=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            echo "Recurring scheduled ingestion is ACTIVE (ENABLE_CLOUD_INGESTION=true). Proceeding."
             echo "paused=false" >> $GITHUB_OUTPUT
             exit 0
           fi
 
-          # 2. For ANY live ingestion (whether scheduled cron or manual workflow_dispatch),
-          # require explicit activation variable: ENABLE_CLOUD_INGESTION == 'true'
-          if [ "${{ vars.ENABLE_CLOUD_INGESTION }}" != "true" ]; then
+          # 2. Manual workflow_dispatch Ingestion Guard
+          # Tier A: Default Dry-Run Verification (0 external API calls, 0 DB writes)
+          if [ "$DRY_RUN" = "true" ] || [ -z "$DRY_RUN" ]; then
             echo "=========================================================================="
-            echo "URBANPULSE CLOUD INGESTION: ACTIVATION GUARD IS PAUSED."
-            echo "Live cloud ingestion is disabled because ENABLE_CLOUD_INGESTION != 'true'."
-            echo "Event Trigger: ${{ github.event_name }}"
-            echo "To enable live cloud ingestion, configure repository variable:"
-            echo "  ENABLE_CLOUD_INGESTION = true"
-            echo "under Settings -> Secrets and variables -> Actions -> Variables."
+            echo "MANUAL DRY-RUN VERIFICATION REQUESTED"
+            echo "Proceeding in dry-run mode (0 external API calls, 0 database writes)."
+            echo "=========================================================================="
+            echo "paused=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Tier B: Live Run Requested without explicit confirmation
+          if [ "$CONFIRM_LIVE" != "true" ]; then
+            echo "=========================================================================="
+            echo "MANUAL LIVE INGESTION GUARD: REJECTED (Missing Confirmation)"
+            echo "dry_run was set to false, but confirm_live_ingestion was NOT set to true."
+            echo "To execute a controlled live batch, you MUST explicitly set:"
+            echo "  dry_run = false"
+            echo "  confirm_live_ingestion = true"
+            echo "Preventing accidental live execution."
             echo "=========================================================================="
             echo "paused=true" >> $GITHUB_OUTPUT
             exit 0
           fi
+
+          # Tier C: Explicitly Confirmed Manual Live Batch
+          echo "=========================================================================="
+          echo "CONTROLLED MANUAL LIVE INGESTION AUTHORIZED"
+          echo "Explicit confirmation received (dry_run=false, confirm_live_ingestion=true)."
+          echo "Executing one controlled live batch against TiDB Cloud."
+          echo "Note: Recurring hourly scheduled cron remains paused unless ENABLE_CLOUD_INGESTION=true."
+          echo "=========================================================================="
           echo "paused=false" >> $GITHUB_OUTPUT
+          exit 0
 
       - name: Execute Cloud Batch Ingestion
         if: steps.activation_check.outputs.paused != 'true'
@@ -86,8 +126,12 @@ jobs:
           LOGS_DIR: logs
         run: |
           ARGS=""
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            ARGS="$ARGS --dry-run"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ "${{ github.event.inputs.dry_run }}" = "false" ] && [ "${{ github.event.inputs.confirm_live_ingestion }}" = "true" ]; then
+              echo "Executing LIVE ingestion batch (Controlled Manual Run)."
+            else
+              ARGS="$ARGS --dry-run"
+            fi
           fi
           if [ "${{ github.event.inputs.force }}" = "true" ]; then
             ARGS="$ARGS --force"

@@ -249,30 +249,50 @@ class TestCloudIngestionArchitecture(unittest.TestCase):
                         self.assertEqual(len(reservation_calls), 2)
 
     def test_workflow_activation_guard_logic(self):
-        """Verifies workflow activation logic for scheduled vs manual and dry_run vs live."""
-        def evaluate_guard(event_name, dry_run_input, enable_cloud_var):
-            if dry_run_input == "true":
+        """
+        Verifies workflow activation logic:
+        1. Scheduled runs remain disabled by default without ENABLE_CLOUD_INGESTION=true.
+        2. Scheduled runs execute live only when ENABLE_CLOUD_INGESTION=true.
+        3. Manual dry-runs remain the default and proceed safely in dry-run mode.
+        4. Manual live runs require explicit confirm_live_ingestion=true.
+        5. Live-test confirmation does NOT activate recurring scheduled ingestion.
+        """
+        def evaluate_guard(event_name, dry_run_input, confirm_live_input, enable_cloud_var):
+            # 1. Scheduled Recurring Cron Ingestion Guard
+            if event_name == "schedule":
+                if enable_cloud_var != "true":
+                    return "paused_scheduled_disabled"
+                return "proceed_scheduled_live"
+
+            # 2. Manual workflow_dispatch Ingestion Guard
+            if dry_run_input == "true" or not dry_run_input:
                 return "proceed_dry_run"
-            if enable_cloud_var != "true":
-                return "paused"
-            return "proceed_live"
 
-        # 1. Scheduled cron with activation paused -> paused
-        self.assertEqual(evaluate_guard("schedule", "false", "false"), "paused")
-        self.assertEqual(evaluate_guard("schedule", "false", ""), "paused")
+            if confirm_live_input != "true":
+                return "paused_missing_confirmation"
 
-        # 2. Scheduled cron with activation enabled -> proceed_live
-        self.assertEqual(evaluate_guard("schedule", "false", "true"), "proceed_live")
+            return "proceed_manual_live"
 
-        # 3. Manual dispatch with dry_run true -> proceed_dry_run regardless of variable
-        self.assertEqual(evaluate_guard("workflow_dispatch", "true", "false"), "proceed_dry_run")
-        self.assertEqual(evaluate_guard("workflow_dispatch", "true", "true"), "proceed_dry_run")
+        # 1. Scheduled runs remain disabled by default without ENABLE_CLOUD_INGESTION=true
+        self.assertEqual(evaluate_guard("schedule", "false", "false", "false"), "paused_scheduled_disabled")
+        self.assertEqual(evaluate_guard("schedule", "false", "false", ""), "paused_scheduled_disabled")
 
-        # 4. Manual dispatch with dry_run false and activation paused -> paused (safety guard!)
-        self.assertEqual(evaluate_guard("workflow_dispatch", "false", "false"), "paused")
+        # 2. Scheduled runs execute live only when ENABLE_CLOUD_INGESTION=true
+        self.assertEqual(evaluate_guard("schedule", "false", "false", "true"), "proceed_scheduled_live")
 
-        # 5. Manual dispatch with dry_run false and activation true -> proceed_live
-        self.assertEqual(evaluate_guard("workflow_dispatch", "false", "true"), "proceed_live")
+        # 3. Manual dry-runs remain safe (default dry_run=true) regardless of other inputs
+        self.assertEqual(evaluate_guard("workflow_dispatch", "true", "false", "false"), "proceed_dry_run")
+        self.assertEqual(evaluate_guard("workflow_dispatch", "true", "true", "false"), "proceed_dry_run")
+        self.assertEqual(evaluate_guard("workflow_dispatch", "", "false", "false"), "proceed_dry_run")
+
+        # 4. Manual live runs require explicit confirmation
+        self.assertEqual(evaluate_guard("workflow_dispatch", "false", "false", "false"), "paused_missing_confirmation")
+        self.assertEqual(evaluate_guard("workflow_dispatch", "false", "", "false"), "paused_missing_confirmation")
+        self.assertEqual(evaluate_guard("workflow_dispatch", "false", "true", "false"), "proceed_manual_live")
+
+        # 5. Live-test confirmation does NOT activate scheduled ingestion
+        # If confirm_live was 'true' in a manual run, scheduled run is still strictly paused
+        self.assertEqual(evaluate_guard("schedule", "false", "true", "false"), "paused_scheduled_disabled")
 
     def test_opening_balance_never_repeatedly_added(self):
         """Verifies opening balance is applied as a baseline floor once and cannot be repeatedly added."""
