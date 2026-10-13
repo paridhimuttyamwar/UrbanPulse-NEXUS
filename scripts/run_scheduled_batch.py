@@ -317,14 +317,17 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
     # 6. Aggregate Rollups
     logger.info("Computing metric aggregations...")
     t0_roll = time.time()
+    rollups_refreshed = False
     try:
         from analytics.traffic_analytics import traffic_analytics
         from analytics.environment_analytics import environment_analytics
-        traffic_analytics.compute_and_store_hourly_metrics()
-        environment_analytics.compute_and_store_daily_metrics()
-        logger.info("Metric rollups computed and persisted successfully.")
+        trf_agg_cnt = traffic_analytics.compute_and_store_hourly_metrics()
+        env_agg_cnt = environment_analytics.compute_and_store_daily_metrics()
+        rollups_refreshed = True
+        logger.info(f"Metric rollups computed and persisted successfully ({trf_agg_cnt} traffic, {env_agg_cnt} env).")
     except Exception as e:
-        logger.warning(f"Rollup calculation warning: {e}")
+        logger.error(f"Rollup calculation failed: {e}")
+        errors.append(f"Rollup calculation error: {str(e)}")
     t_roll = time.time() - t0_roll
 
     # 7. Finalize Telemetry in pipeline_runs
@@ -417,8 +420,10 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
     print(f"   • Traffic Readings:   {new_trf} new inserted ({trf_ok - new_trf if trf_ok >= new_trf else 0} updated/existing)", flush=True)
     print(f"   • Weather Readings:   {new_wtr} new inserted", flush=True)
     print(f"   • Air Quality:        {new_aqi} new inserted", flush=True)
-    print(f"   • Anomalies Detected: {new_anom} new logged ({anom_count} total detected)", flush=True)
-    print(f"   • Rollup Aggregations: Hourly traffic & Daily environment rollups refreshed", flush=True)
+    if rollups_refreshed:
+        print(f"   • Rollup Aggregations: Hourly traffic & Daily environment rollups refreshed", flush=True)
+    else:
+        print(f"   • Rollup Aggregations: [WARNING/FAILED] Aggregation error encountered (see logs)", flush=True)
     print("-" * 78, flush=True)
     print("4. FINAL DATABASE ROW COUNTS (TiDB Cloud):", flush=True)
     for tbl, count in final_counts.items():

@@ -89,10 +89,31 @@ class TrafficAnalytics:
         return df
 
     @classmethod
+    def _ensure_schema_compatibility(cls):
+        """
+        Ensures hourly_traffic_metrics columns allow NULL for unmeasured vehicle telemetry.
+        Idempotent and safe across local MySQL and TiDB Cloud.
+        """
+        try:
+            with get_db_cursor(commit=True) as cursor:
+                cursor.execute("""
+                    ALTER TABLE hourly_traffic_metrics 
+                    MODIFY COLUMN avg_vehicle_count DECIMAL(7, 2) NULL DEFAULT NULL;
+                """)
+                cursor.execute("""
+                    ALTER TABLE hourly_traffic_metrics 
+                    MODIFY COLUMN peak_vehicle_count INT NULL DEFAULT NULL;
+                """)
+                logger.info("Ensured hourly_traffic_metrics schema allows NULL vehicle counts.")
+        except Exception as e:
+            logger.debug(f"Schema compatibility notice: {e}")
+
+    @classmethod
     def compute_and_store_hourly_metrics(cls) -> int:
         """
         Aggregates traffic data into hourly buckets and writes idempotently
         into hourly_traffic_metrics table.
+        Semantically preserves unmeasured vehicle counts as NULL without fabrication or zero-filling.
         """
         df = cls.load_traffic_dataframe(limit=50000)
         if df.empty:
@@ -107,6 +128,9 @@ class TrafficAnalytics:
         df["congestion_score"] = df["congestion_level"].map(congestion_map).fillna(1.0)
 
         # Aggregate by segment and hour
+        # Note: When vehicle_count is missing (e.g. genuine TomTom Flow observations),
+        # mean() and max() evaluate to NaN (unknown). We preserve unknown as NULL
+        # rather than fabricating counts or replacing with zero.
         grouped = df.groupby(["segment_id", "hour_bucket"]).agg(
             avg_vehicle_count=("vehicle_count", "mean"),
             avg_speed_kmh=("avg_speed_kmh", "mean"),
@@ -132,10 +156,33 @@ class TrafficAnalytics:
         """
 
         records = grouped.to_dict(orient="records")
-        with get_db_cursor(commit=True) as cursor:
-            for row in records:
-                row["hour_bucket"] = row["hour_bucket"].to_pydatetime()
-                cursor.execute(insert_query, row)
+        for row in records:
+            row["hour_bucket"] = row["hour_bucket"].to_pydatetime()
+            avg_vc = row.get("avg_vehicle_count")
+            row["avg_vehicle_count"] = None if pd.isna(avg_vc) else round(float(avg_vc), 2)
+            peak_vc = row.get("peak_vehicle_count")
+            row["peak_vehicle_count"] = None if pd.isna(peak_vc) else int(round(float(peak_vc)))
+            avg_spd = row.get("avg_speed_kmh")
+            row["avg_speed_kmh"] = round(float(avg_spd), 2) if not pd.isna(avg_spd) else 0.0
+            cong = row.get("congestion_index")
+            row["congestion_index"] = round(float(cong), 2) if not pd.isna(cong) else 1.0
+            cnt = row.get("sample_count")
+            row["sample_count"] = int(cnt) if not pd.isna(cnt) else 0
+
+        try:
+            with get_db_cursor(commit=True) as cursor:
+                for row in records:
+                    cursor.execute(insert_query, row)
+        except Exception as e:
+            err_str = str(e)
+            if "1048" in err_str or "cannot be null" in err_str.lower():
+                logger.warning(f"Column nullability restriction detected: {e}. Applying schema compatibility...")
+                cls._ensure_schema_compatibility()
+                with get_db_cursor(commit=True) as cursor:
+                    for row in records:
+                        cursor.execute(insert_query, row)
+            else:
+                raise
 
         logger.info(f"Updated {len(records)} hourly traffic aggregate metrics.")
         return len(records)
