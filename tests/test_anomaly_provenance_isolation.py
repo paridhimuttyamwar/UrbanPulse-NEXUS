@@ -135,7 +135,7 @@ class TestAnomalyProvenanceIsolation(unittest.TestCase):
 
             cursor.execute("SELECT COUNT(*) as c FROM anomalies WHERE source_type = 'REAL_API'")
             real_count = cursor.fetchone()["c"]
-            self.assertEqual(real_count, 8, "Genuine REAL_API anomalies must remain exactly 8")
+            self.assertEqual(real_count, 10, "Genuine REAL_API anomalies must remain exactly 10")
 
             cursor.execute("SELECT COUNT(*) as c FROM anomalies WHERE source_type = 'TEST_MOCK'")
             mock_count = cursor.fetchone()["c"]

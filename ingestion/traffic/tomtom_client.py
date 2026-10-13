@@ -41,7 +41,18 @@ class TomTomBudgetTracker:
         monthly_budget: Optional[int] = None,
     ):
         self.state_file = state_file or settings.TOMTOM_USAGE_STATE_FILE
+        self.is_custom_state_file = (state_file is not None and state_file != settings.TOMTOM_USAGE_STATE_FILE)
         self.monthly_budget = monthly_budget or settings.TOMTOM_MONTHLY_BUDGET
+
+        if self.is_custom_state_file or self.monthly_budget <= 500:
+            self.safety_margin = 0
+            self.opening_balance = 0
+            self.effective_limit = self.monthly_budget
+        else:
+            self.safety_margin = getattr(settings, "TOMTOM_SAFETY_MARGIN", 500)
+            self.effective_limit = max(0, self.monthly_budget - self.safety_margin)
+            self.opening_balance = getattr(settings, "TOMTOM_CONSERVATIVE_OPENING_BALANCE", 200)
+
         self._ensure_state_file()
 
     @contextlib.contextmanager
@@ -135,26 +146,247 @@ class TomTomBudgetTracker:
         except Exception as e:
             logger.warning(f"Failed to persist TomTom usage state: {e}")
 
-    def can_request(self) -> Tuple[bool, str]:
-        """Checks if another HTTP request is permitted under safety budget with lock."""
-        with self._file_lock():
-            state = self._load_state()
-            attempted = state.get("requests_attempted", 0)
-            budget = state.get("monthly_budget", self.monthly_budget)
+    def _ensure_durable_table(self):
+        """Ensures the api_quota_tracking table exists in the target database."""
+        if self.is_custom_state_file:
+            return
+        try:
+            from database.connection import get_db_cursor
+            with get_db_cursor(commit=True) as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS api_quota_tracking (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        service_name VARCHAR(32) NOT NULL,
+                        billing_month VARCHAR(7) NOT NULL,
+                        requests_attempted INT NOT NULL DEFAULT 0,
+                        requests_successful INT NOT NULL DEFAULT 0,
+                        requests_failed INT NOT NULL DEFAULT 0,
+                        last_request_at DATETIME,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                        UNIQUE KEY uq_service_month (service_name, billing_month)
+                    ) ENGINE=InnoDB;
+                """)
+        except Exception as e:
+            logger.debug(f"Note on ensure_durable_table: {e}")
 
-            if attempted >= budget:
+    def _load_durable_state(self, current_month: str) -> Optional[Dict[str, Any]]:
+        """Queries durable database storage for current month quota accounting."""
+        if self.is_custom_state_file:
+            return None
+        try:
+            self._ensure_durable_table()
+            from database.connection import get_db_cursor
+            with get_db_cursor(commit=False) as cursor:
+                cursor.execute(
+                    "SELECT requests_attempted, requests_successful, requests_failed, last_request_at "
+                    "FROM api_quota_tracking WHERE service_name = 'tomtom_traffic' AND billing_month = %s;",
+                    (current_month,)
+                )
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "month": current_month,
+                        "requests_attempted": int(row["requests_attempted"]),
+                        "requests_successful": int(row["requests_successful"]),
+                        "requests_failed": int(row["requests_failed"]),
+                        "last_request_timestamp": str(row["last_request_at"]) if row.get("last_request_at") else None,
+                    }
+                return {
+                    "month": current_month,
+                    "requests_attempted": 0,
+                    "requests_successful": 0,
+                    "requests_failed": 0,
+                    "last_request_timestamp": None,
+                }
+        except Exception as e:
+            logger.error(f"Durable quota lookup failed: {e}")
+            return None
+
+    def _reserve_durable_slot(self, current_month: str) -> Tuple[bool, str, int]:
+        """
+        Atomically checks capacity and reserves 1 request slot in durable database storage.
+        Uses pessimistic locking (SELECT ... FOR UPDATE) to ensure concurrency safety
+        across multiple ephemeral GitHub runners and background worker processes.
+        Returns: (reserved: bool, message: str, new_attempted_count: int)
+        """
+        if self.is_custom_state_file:
+            return False, "Custom test state file", 0
+        try:
+            self._ensure_durable_table()
+            from database.connection import get_db_cursor
+            with get_db_cursor(commit=False) as cursor:
+                conn = cursor._connection
+                if getattr(conn, "autocommit", False):
+                    conn.autocommit = False
+
+                cursor.execute(
+                    "SELECT requests_attempted FROM api_quota_tracking "
+                    "WHERE service_name = 'tomtom_traffic' AND billing_month = %s FOR UPDATE;",
+                    (current_month,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    initial_count = max(self.opening_balance, 0) + 1
+                    if initial_count > self.effective_limit:
+                        conn.rollback()
+                        return False, f"Conservative opening balance ({self.opening_balance}) reaches effective limit ({self.effective_limit})", 0
+                    cursor.execute(
+                        "INSERT INTO api_quota_tracking (service_name, billing_month, requests_attempted, requests_successful, requests_failed, last_request_at) "
+                        "VALUES ('tomtom_traffic', %s, %s, 0, 0, UTC_TIMESTAMP());",
+                        (current_month, initial_count)
+                    )
+                    conn.commit()
+                    return True, f"Slot {initial_count}/{self.effective_limit} reserved", initial_count
+
+                current_count = int(row["requests_attempted"])
+                if current_count < self.opening_balance:
+                    current_count = self.opening_balance
+
+                if current_count >= self.effective_limit:
+                    conn.rollback()
+                    msg = (
+                        f"TomTom API safety cutoff engaged: {current_count}/{self.effective_limit} requests used "
+                        f"(Safety margin: {self.safety_margin}, Absolute cap: {self.monthly_budget}) "
+                        f"for month {current_month}. Request halted."
+                    )
+                    return False, msg, current_count
+
+                new_count = current_count + 1
+                cursor.execute(
+                    "UPDATE api_quota_tracking SET requests_attempted = %s, last_request_at = UTC_TIMESTAMP() "
+                    "WHERE service_name = 'tomtom_traffic' AND billing_month = %s;",
+                    (new_count, current_month)
+                )
+                conn.commit()
+                return True, f"Slot {new_count}/{self.effective_limit} reserved", new_count
+
+        except Exception as e:
+            try:
+                if 'conn' in locals():
+                    conn.rollback()
+            except Exception:
+                pass
+            logger.error(f"Durable reservation failed: {e}")
+            return False, f"Durable quota reservation error: {e}", 0
+
+    def _record_durable_outcome(self, current_month: str, successful: bool) -> bool:
+        """Atomically records request outcome (success or failure) in durable database storage."""
+        if self.is_custom_state_file:
+            return False
+        succ = 1 if successful else 0
+        fail = 0 if successful else 1
+        try:
+            self._ensure_durable_table()
+            from database.connection import get_db_cursor
+            with get_db_cursor(commit=True) as cursor:
+                cursor.execute("""
+                    UPDATE api_quota_tracking 
+                    SET requests_successful = requests_successful + %(succ)s,
+                        requests_failed = requests_failed + %(fail)s,
+                        last_request_at = UTC_TIMESTAMP()
+                    WHERE service_name = 'tomtom_traffic' AND billing_month = %(month)s;
+                """, {"month": current_month, "succ": succ, "fail": fail})
+            return True
+        except Exception as e:
+            logger.error(f"Failed to record durable quota outcome: {e}")
+            return False
+
+    def can_request(self) -> Tuple[bool, str]:
+        """
+        Non-mutating pre-flight check if capacity is available under the safety budget.
+        Checks durable database first, applying safety margin and conservative opening balance.
+        Fails closed in cloud mode if durable storage cannot be verified.
+        """
+        current_month = self._get_current_month_key()
+
+        # 1. Check durable database storage
+        durable_state = self._load_durable_state(current_month)
+        if durable_state is None:
+            if settings.is_cloud:
+                return (
+                    False,
+                    f"TomTom API safety cutoff engaged: Unable to verify monthly quota from durable storage for {current_month}. Failing closed."
+                )
+
+        # 2. Reconcile with local file state and conservative opening balance
+        with self._file_lock():
+            local_state = self._load_state()
+            local_attempted = local_state.get("requests_attempted", 0) if local_state.get("month") == current_month else 0
+            durable_attempted = durable_state.get("requests_attempted", 0) if durable_state else 0
+            attempted = max(local_attempted, durable_attempted, self.opening_balance)
+
+            if attempted >= self.effective_limit:
                 msg = (
-                    f"TomTom API safety cutoff engaged: {attempted}/{budget} requests used "
-                    f"for month {state.get('month')}. Request halted."
+                    f"TomTom API safety cutoff engaged: {attempted}/{self.effective_limit} requests used "
+                    f"(Safety margin: {self.safety_margin}, Absolute cap: {self.monthly_budget}) "
+                    f"for month {current_month}. Request halted."
                 )
                 return False, msg
+
             return True, "Budget available"
 
-    def record_attempt(self, successful: bool):
-        """Records an attempted HTTP request and its outcome with process lock."""
+    def reserve_request(self) -> Tuple[bool, str]:
+        """
+        Atomically checks and reserves 1 request slot BEFORE issuing an HTTP request.
+        Must be called for every single HTTP request attempt (including retries).
+        Fails closed in cloud mode if durable storage cannot be verified.
+        """
+        current_month = self._get_current_month_key()
+
+        # In cloud mode, require durable DB reservation
+        if settings.is_cloud:
+            ok, msg, _ = self._reserve_durable_slot(current_month)
+            if not ok:
+                return False, msg
+            # Also update local state cache if accessible
+            try:
+                with self._file_lock():
+                    state = self._load_state()
+                    state["requests_attempted"] = max(state.get("requests_attempted", 0), self.opening_balance) + 1
+                    state["last_request_timestamp"] = datetime.now(timezone.utc).isoformat()
+                    self._save_state(state)
+            except Exception:
+                pass
+            return True, msg
+
+        # In local mode, reserve under local file lock and sync to DB
+        with self._file_lock():
+            local_state = self._load_state()
+            local_attempted = local_state.get("requests_attempted", 0) if local_state.get("month") == current_month else 0
+            
+            # Reconcile with durable DB if available
+            durable_state = self._load_durable_state(current_month)
+            durable_attempted = durable_state.get("requests_attempted", 0) if durable_state else 0
+            
+            current_attempted = max(local_attempted, durable_attempted, self.opening_balance)
+            if current_attempted >= self.effective_limit:
+                msg = (
+                    f"TomTom API safety cutoff engaged: {current_attempted}/{self.effective_limit} requests used "
+                    f"(Safety margin: {self.safety_margin}, Absolute cap: {self.monthly_budget}) "
+                    f"for month {current_month}. Request halted."
+                )
+                return False, msg
+
+            new_attempted = current_attempted + 1
+            local_state["requests_attempted"] = new_attempted
+            local_state["last_request_timestamp"] = datetime.now(timezone.utc).isoformat()
+            self._save_state(local_state)
+
+            # Replicate reservation to durable DB if available
+            self._reserve_durable_slot(current_month)
+            return True, f"Slot {new_attempted}/{self.effective_limit} reserved"
+
+    def record_outcome(self, successful: bool):
+        """Records the outcome of an already-attempted request across durable storage and local state."""
+        current_month = self._get_current_month_key()
+
+        # 1. Update durable cloud storage atomically
+        self._record_durable_outcome(current_month, successful)
+
+        # 2. Update local state file cache with file lock
         with self._file_lock():
             state = self._load_state()
-            state["requests_attempted"] = state.get("requests_attempted", 0) + 1
             if successful:
                 state["requests_successful"] = state.get("requests_successful", 0) + 1
             else:
@@ -162,10 +394,34 @@ class TomTomBudgetTracker:
             state["last_request_timestamp"] = datetime.now(timezone.utc).isoformat()
             self._save_state(state)
 
+    def record_attempt(self, successful: bool):
+        """Legacy / direct attempt recording that increments attempted and outcome."""
+        self.reserve_request()
+        self.record_outcome(successful=successful)
+
     def get_usage(self) -> Dict[str, Any]:
-        """Returns current accounting window usage metrics."""
+        """Returns current accounting window usage metrics from durable storage and local cache."""
+        current_month = self._get_current_month_key()
+        durable_state = self._load_durable_state(current_month)
+
         with self._file_lock():
-            return self._load_state()
+            local_state = self._load_state()
+            local_attempted = local_state.get("requests_attempted", 0) if local_state.get("month") == current_month else 0
+            durable_attempted = durable_state.get("requests_attempted", 0) if durable_state else 0
+            attempted = max(local_attempted, durable_attempted, self.opening_balance)
+
+            return {
+                "month": current_month,
+                "requests_attempted": attempted,
+                "requests_successful": max(local_state.get("requests_successful", 0), (durable_state.get("requests_successful", 0) if durable_state else 0)),
+                "requests_failed": max(local_state.get("requests_failed", 0), (durable_state.get("requests_failed", 0) if durable_state else 0)),
+                "monthly_budget": self.monthly_budget,
+                "safety_margin": self.safety_margin,
+                "opening_balance": self.opening_balance,
+                "effective_limit": self.effective_limit,
+                "durable_synced": durable_state is not None,
+                "last_request_timestamp": local_state.get("last_request_timestamp") or (durable_state.get("last_request_timestamp") if durable_state else None),
+            }
 
 
 class TomTomTrafficClient:
@@ -258,11 +514,12 @@ class TomTomTrafficClient:
         last_error = None
 
         for attempt in range(1, attempts + 1):
-            # Budget check before retry
-            if attempt > 1:
-                allowed, budget_msg = self.budget_tracker.can_request()
-                if not allowed:
-                    return False, None, budget_msg
+            # Atomically reserve 1 request slot BEFORE issuing the HTTP request
+            # Ensures failures, timeouts, and retries are strictly accounted for and cannot exceed the quota
+            reserved, reserve_msg = self.budget_tracker.reserve_request()
+            if not reserved:
+                logger.warning(f"TomTom API request blocked by quota reservation (Attempt {attempt}/{attempts}): {reserve_msg}")
+                return False, None, reserve_msg
 
             try:
                 self.session_requests_consumed += 1
@@ -270,12 +527,12 @@ class TomTomTrafficClient:
                 response = requests.get(target_url, params=params, timeout=self.timeout)
 
                 if response.status_code == 200:
-                    self.budget_tracker.record_attempt(successful=True)
+                    self.budget_tracker.record_outcome(successful=True)
                     payload = response.json()
                     return True, payload, None
 
                 # For 403 or 429, do not retry - record failure immediately
-                self.budget_tracker.record_attempt(successful=False)
+                self.budget_tracker.record_outcome(successful=False)
                 if response.status_code == 403:
                     last_error = "TomTom API Authentication Error 403: Forbidden or invalid API key."
                     logger.error(last_error)
@@ -289,11 +546,11 @@ class TomTomTrafficClient:
                     logger.warning(last_error)
 
             except requests.Timeout:
-                self.budget_tracker.record_attempt(successful=False)
+                self.budget_tracker.record_outcome(successful=False)
                 last_error = f"TomTom API request timed out after {self.timeout}s."
                 logger.warning(last_error)
             except requests.RequestException as e:
-                self.budget_tracker.record_attempt(successful=False)
+                self.budget_tracker.record_outcome(successful=False)
                 last_error = f"TomTom API network connection error: {str(e)}"
                 logger.warning(last_error)
 

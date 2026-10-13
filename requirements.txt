@@ -7,6 +7,7 @@ numpy>=1.24.0
 
 # Database
 mysql-connector-python>=8.0.33
+certifi>=2023.7.22
 
 # Streaming & Serial Gateway
 kafka-python-ng>=2.2.2

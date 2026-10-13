@@ -29,12 +29,30 @@ class Settings:
     DEFAULT_LONGITUDE: float = 79.0882
     DEFAULT_TIMEZONE: str = "Asia/Kolkata"
 
-    # MySQL Configuration
+    # Explicit Environment Selection: 'local' (default) vs 'cloud'
+    URBANPULSE_ENV: str = os.getenv("URBANPULSE_ENV", "local").lower().strip()
+
+    @property
+    def is_cloud(self) -> bool:
+        return self.URBANPULSE_ENV == "cloud"
+
+    @property
+    def is_local(self) -> bool:
+        return self.URBANPULSE_ENV != "cloud"
+
+    # MySQL Configuration (Local Development)
     MYSQL_HOST: str = os.getenv("MYSQL_HOST", "localhost")
     MYSQL_PORT: int = int(os.getenv("MYSQL_PORT", 3306))
     MYSQL_USER: str = os.getenv("MYSQL_USER", "root")
     MYSQL_PASSWORD: str = os.getenv("MYSQL_PASSWORD", "root123")
     MYSQL_DATABASE: str = os.getenv("MYSQL_DATABASE", "urbanpulse")
+
+    # TiDB Cloud Configuration (Secure Cloud Operations)
+    TIDB_HOST: str = os.getenv("TIDB_HOST", "")
+    TIDB_PORT: int = int(os.getenv("TIDB_PORT", 4000))
+    TIDB_USER: str = os.getenv("TIDB_USER", "")
+    TIDB_PASSWORD: str = os.getenv("TIDB_PASSWORD", "")
+    TIDB_DATABASE: str = os.getenv("TIDB_DATABASE", "urbanpulse")
 
     # Kafka Configuration
     KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
@@ -64,6 +82,9 @@ class Settings:
         "https://api.tomtom.com/traffic/services/4/flowSegmentData/relative0/10/json",
     )
     TOMTOM_MONTHLY_BUDGET: int = int(os.getenv("TOMTOM_MONTHLY_BUDGET", 16000))
+    TOMTOM_SAFETY_MARGIN: int = int(os.getenv("TOMTOM_SAFETY_MARGIN", 500))
+    # Documented conservative opening balance for October 2026 (accounts for earlier development & probe attempts)
+    TOMTOM_CONSERVATIVE_OPENING_BALANCE: int = int(os.getenv("TOMTOM_CONSERVATIVE_OPENING_BALANCE", 200))
     TOMTOM_USAGE_STATE_FILE: Path = BASE_DIR / "data" / "tomtom_usage_state.json"
 
     # Traffic Simulator Configuration

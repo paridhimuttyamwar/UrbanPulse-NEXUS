@@ -52,10 +52,15 @@ CREATE TABLE IF NOT EXISTS traffic_readings (
     sensor_id VARCHAR(32) NOT NULL,
     segment_id VARCHAR(32) NOT NULL,
     timestamp DATETIME NOT NULL,
-    vehicle_count INT NOT NULL,
+    vehicle_count INT DEFAULT NULL,
     avg_speed_kmh DECIMAL(5, 2) NOT NULL,
+    free_flow_speed_kmh DECIMAL(5, 2) DEFAULT NULL,
+    current_travel_time_sec INT DEFAULT NULL,
+    free_flow_travel_time_sec INT DEFAULT NULL,
+    confidence_score DECIMAL(4, 3) DEFAULT NULL,
+    road_closure TINYINT(1) DEFAULT 0,
     congestion_level ENUM('LOW', 'MEDIUM', 'HIGH', 'SEVERE') NOT NULL,
-    traffic_density_vpk DECIMAL(6, 2) NOT NULL,
+    traffic_density_vpk DECIMAL(6, 2) DEFAULT NULL,
     source_type VARCHAR(20) NOT NULL DEFAULT 'SIMULATED',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (segment_id) REFERENCES road_segments(segment_id) ON DELETE CASCADE,
@@ -149,6 +154,8 @@ CREATE TABLE IF NOT EXISTS anomalies (
     description TEXT NOT NULL,
     status ENUM('ACTIVE', 'RESOLVED', 'ACKNOWLEDGED') NOT NULL DEFAULT 'ACTIVE',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    resolution_notes TEXT DEFAULT NULL,
+    resolved_at DATETIME DEFAULT NULL,
     INDEX idx_anomaly_status (status),
     INDEX idx_anomaly_time (timestamp)
 ) ENGINE=InnoDB;
@@ -211,3 +218,18 @@ CREATE TABLE IF NOT EXISTS rejected_records (
     INDEX idx_rejected_source (source_name),
     INDEX idx_rejected_timestamp (timestamp)
 ) ENGINE=InnoDB;
+
+-- 14. API Quota Tracking Table (Durable Cross-Platform Quota Accounting)
+CREATE TABLE IF NOT EXISTS api_quota_tracking (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    service_name VARCHAR(32) NOT NULL,
+    billing_month VARCHAR(7) NOT NULL,
+    requests_attempted INT NOT NULL DEFAULT 0,
+    requests_successful INT NOT NULL DEFAULT 0,
+    requests_failed INT NOT NULL DEFAULT 0,
+    last_request_at DATETIME,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_service_month (service_name, billing_month)
+) ENGINE=InnoDB;
+
