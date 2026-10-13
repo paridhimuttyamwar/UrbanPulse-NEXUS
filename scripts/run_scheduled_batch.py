@@ -13,6 +13,7 @@ Supports dry-run verification mode, cadence guards, and strict environment isola
 import sys
 import argparse
 import logging
+import time
 import uuid
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -215,6 +216,7 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
 
     # 0. Snapshot Initial Database Row Counts for Accurate Delta Reporting
     initial_counts = {}
+    t0_snapshot_init = time.time()
     try:
         with get_db_cursor(commit=False) as cursor:
             for tbl in ["traffic_readings", "weather_readings", "air_quality_readings", "anomalies", "pipeline_runs"]:
@@ -225,6 +227,7 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
                     initial_counts[tbl] = 0
     except Exception as e:
         logger.debug(f"Could not snapshot initial row counts: {e}")
+    t_snapshot_init = time.time() - t0_snapshot_init
 
     # Log start to pipeline_runs
     try:
@@ -248,6 +251,7 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
     trf_ok = 0
     trf_fail = 0
     trf_res = {}
+    t0_trf = time.time()
     try:
         from ingestion.traffic.tomtom_client import tomtom_client
         trf_res = tomtom_client.ingest_all_corridors()
@@ -261,10 +265,12 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"TomTom ingestion exception: {e}")
         errors.append(f"TomTom exception: {str(e)}")
+    t_trf = time.time() - t0_trf
 
     # 3. Open-Meteo Weather Ingestion
     logger.info("Executing Nagpur Weather Ingestion (Open-Meteo)...")
     w_ok = False
+    t0_wtr = time.time()
     try:
         from ingestion.weather.weather_client import weather_client
         w_ok = weather_client.ingest_primary_city()
@@ -276,10 +282,12 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Weather ingestion exception: {e}")
         errors.append(f"Weather exception: {str(e)}")
+    t_wtr = time.time() - t0_wtr
 
     # 4. Open-Meteo Air Quality Ingestion
     logger.info("Executing Nagpur Air Quality Ingestion (Open-Meteo)...")
     aq_ok = False
+    t0_aqi = time.time()
     try:
         from ingestion.air_quality.air_quality_client import air_quality_client
         aq_ok = air_quality_client.ingest_primary_city()
@@ -291,10 +299,12 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Air quality ingestion exception: {e}")
         errors.append(f"Air quality exception: {str(e)}")
+    t_aqi = time.time() - t0_aqi
 
     # 5. Rule-Based Anomaly Detection
     logger.info("Evaluating operational anomaly rules...")
     anom_count = 0
+    t0_anom = time.time()
     try:
         from anomaly_detection.rule_engine import anomaly_engine
         anom_res = anomaly_engine.evaluate_operational_anomalies(location_id="LOC_NAGPUR")
@@ -302,9 +312,11 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
         logger.info(f"Anomaly evaluation completed: {anom_count} incidents detected.")
     except Exception as e:
         logger.warning(f"Anomaly detection warning: {e}")
+    t_anom = time.time() - t0_anom
 
     # 6. Aggregate Rollups
     logger.info("Computing metric aggregations...")
+    t0_roll = time.time()
     try:
         from analytics.traffic_analytics import traffic_analytics
         from analytics.environment_analytics import environment_analytics
@@ -313,6 +325,7 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
         logger.info("Metric rollups computed and persisted successfully.")
     except Exception as e:
         logger.warning(f"Rollup calculation warning: {e}")
+    t_roll = time.time() - t0_roll
 
     # 7. Finalize Telemetry in pipeline_runs
     finished_time = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -335,6 +348,7 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
 
     # 8. Query Final Database Row Counts & Output Comprehensive Batch Report
     final_counts = {}
+    t0_snapshot_final = time.time()
     try:
         with get_db_cursor(commit=False) as cursor:
             for tbl in [
@@ -348,6 +362,7 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
                     final_counts[tbl] = "N/A"
     except Exception as e:
         logger.debug(f"Could not retrieve post-batch row counts: {e}")
+    t_snapshot_final = time.time() - t0_snapshot_final
 
     quota_summary = {}
     try:
@@ -362,6 +377,17 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
     new_aqi = (final_counts.get("air_quality_readings", 0) - initial_counts.get("air_quality_readings", 0)) if isinstance(final_counts.get("air_quality_readings"), int) else (1 if aq_ok else 0)
     new_anom = (final_counts.get("anomalies", 0) - initial_counts.get("anomalies", 0)) if isinstance(final_counts.get("anomalies"), int) else 0
 
+    stage_timings = {
+        "snapshot_init_sec": round(t_snapshot_init, 2),
+        "traffic_ingestion_sec": round(t_trf, 2),
+        "weather_ingestion_sec": round(t_wtr, 2),
+        "air_quality_ingestion_sec": round(t_aqi, 2),
+        "anomaly_detection_sec": round(t_anom, 2),
+        "metric_rollups_sec": round(t_roll, 2),
+        "snapshot_final_sec": round(t_snapshot_final, 2),
+        "total_batch_sec": round(duration_sec, 2),
+    }
+
     print("\n" + "=" * 78, flush=True)
     print("URBANPULSE NEXUS — CLOUD BATCH INGESTION EXECUTION REPORT", flush=True)
     print("=" * 78, flush=True)
@@ -370,21 +396,31 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
     print(f"Target Database:   TiDB Cloud ({settings.URBANPULSE_ENV.upper()})", flush=True)
     print(f"Duration:          {duration_sec:.2f}s", flush=True)
     print("-" * 78, flush=True)
-    print("1. EXTERNAL API ACTIVITY & BUDGET CONSUMPTION:", flush=True)
+    print("1. PER-STAGE LATENCY & TIMING BREAKDOWN:", flush=True)
+    print(f"   • Initial Count Snapshot:  {t_snapshot_init:.2f}s", flush=True)
+    avg_corridor_sec = (t_trf / 15.0) if (trf_ok + trf_fail) > 0 else 0.0
+    print(f"   • TomTom Traffic Stage:    {t_trf:.2f}s (15 corridors, avg {avg_corridor_sec:.2f}s/corridor)", flush=True)
+    print(f"   • Open-Meteo Weather Stage:{t_wtr:.2f}s", flush=True)
+    print(f"   • Open-Meteo AQI Stage:    {t_aqi:.2f}s", flush=True)
+    print(f"   • Anomaly Detection Stage: {t_anom:.2f}s", flush=True)
+    print(f"   • Metric Rollups Stage:    {t_roll:.2f}s", flush=True)
+    print(f"   • Final Count Snapshot:    {t_snapshot_final:.2f}s", flush=True)
+    print("-" * 78, flush=True)
+    print("2. EXTERNAL API ACTIVITY & BUDGET CONSUMPTION:", flush=True)
     print(f"   • TomTom Traffic:     {trf_ok} successful / {trf_ok + trf_fail} attempts ({trf_fail} failed)", flush=True)
     print(f"   • Open-Meteo Weather: {'1 successful / 1 attempt' if w_ok else '0 successful / 1 attempt'}", flush=True)
     print(f"   • Open-Meteo AQI:     {'1 successful / 1 attempt' if aq_ok else '0 successful / 1 attempt'}", flush=True)
     if quota_summary:
         print(f"   • Month TomTom Usage: {quota_summary.get('requests_attempted')}/{quota_summary.get('effective_limit')} (Cap: {quota_summary.get('monthly_budget')}, Margin: {quota_summary.get('safety_margin')})", flush=True)
     print("-" * 78, flush=True)
-    print("2. DATA INGESTION & ANOMALY RESULTS:", flush=True)
+    print("3. DATA INGESTION & ANOMALY RESULTS:", flush=True)
     print(f"   • Traffic Readings:   {new_trf} new inserted ({trf_ok - new_trf if trf_ok >= new_trf else 0} updated/existing)", flush=True)
     print(f"   • Weather Readings:   {new_wtr} new inserted", flush=True)
     print(f"   • Air Quality:        {new_aqi} new inserted", flush=True)
     print(f"   • Anomalies Detected: {new_anom} new logged ({anom_count} total detected)", flush=True)
     print(f"   • Rollup Aggregations: Hourly traffic & Daily environment rollups refreshed", flush=True)
     print("-" * 78, flush=True)
-    print("3. FINAL DATABASE ROW COUNTS (TiDB Cloud):", flush=True)
+    print("4. FINAL DATABASE ROW COUNTS (TiDB Cloud):", flush=True)
     for tbl, count in final_counts.items():
         print(f"   • {tbl:<26}: {count}", flush=True)
     print("=" * 78 + "\n", flush=True)
@@ -397,6 +433,7 @@ def run_live_scheduled_batch(force: bool = False) -> Dict[str, Any]:
         "records_rejected": total_rejected,
         "errors": errors,
         "final_counts": final_counts,
+        "timings": stage_timings,
     }
 
 

@@ -346,6 +346,33 @@ class AnomalyRuleEngine:
             )
         return None
 
+    def evaluate_operational_anomalies(self, location_id: str = "LOC_NAGPUR") -> Dict[str, Any]:
+        """
+        Evaluates active operational anomalies for a given location or recent observations.
+        Returns a summary dictionary of detected anomalies.
+        """
+        active_count = 0
+        try:
+            with get_db_cursor(commit=False) as cursor:
+                cursor.execute("""
+                    SELECT COUNT(*) AS cnt
+                    FROM anomalies
+                    WHERE status = 'ACTIVE'
+                      AND timestamp >= NOW() - INTERVAL 1 HOUR;
+                """)
+                row = cursor.fetchone()
+                if row:
+                    active_count = row.get("cnt", 0)
+        except Exception as e:
+            logger.debug(f"Operational anomaly evaluation check error: {e}")
+
+        return {
+            "location_id": location_id,
+            "anomalies_detected": active_count,
+            "status": "EVALUATED",
+        }
+
 
 anomaly_engine = AnomalyRuleEngine()
 rule_engine = anomaly_engine
+

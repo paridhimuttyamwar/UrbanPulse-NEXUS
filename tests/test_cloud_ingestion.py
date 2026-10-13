@@ -396,8 +396,31 @@ class TestCloudIngestionArchitecture(unittest.TestCase):
             self.assertEqual(called_kwargs.get("write_timeout"), 15, "write_timeout must be bounded to 15s")
             self.assertTrue(called_kwargs.get("ssl_verify_cert"), "ssl_verify_cert must be True")
 
-    def test_cloud_mode_direct_pure_python_connection(self):
-        """Verifies get_db_connection() in cloud mode creates direct pure-Python connection with bounded timeouts."""
+    def test_cloud_mode_unpooled_connection_when_no_database(self):
+        """Verifies get_db_connection(use_database=False) creates direct pure-Python connection."""
+        settings.URBANPULSE_ENV = "cloud"
+        settings.TIDB_HOST = "gateway01.test.tidbcloud.com"
+        settings.TIDB_USER = "test_user"
+        settings.TIDB_PASSWORD = "test_password"
+
+        import database.connection
+
+        mock_conn = MagicMock()
+        with patch("mysql.connector.connect", return_value=mock_conn) as mock_connect:
+            with database.connection.get_db_connection(use_database=False) as conn:
+                self.assertEqual(conn, mock_conn)
+                mock_connect.assert_called_once()
+                kwargs = mock_connect.call_args[1]
+                self.assertTrue(kwargs.get("use_pure"), "Must use pure-Python driver")
+                self.assertEqual(kwargs.get("connection_timeout"), 15)
+                self.assertEqual(kwargs.get("read_timeout"), 15)
+                self.assertEqual(kwargs.get("write_timeout"), 15)
+                self.assertTrue(kwargs.get("ssl_verify_cert"))
+                self.assertNotIn("database", kwargs)
+            mock_conn.close.assert_called_once()
+
+    def test_cloud_mode_pooled_connection_reuse_and_release(self):
+        """Verifies get_db_connection() in cloud mode borrows from pool and returns on exit."""
         settings.URBANPULSE_ENV = "cloud"
         settings.TIDB_HOST = "gateway01.test.tidbcloud.com"
         settings.TIDB_USER = "test_user"
@@ -406,23 +429,19 @@ class TestCloudIngestionArchitecture(unittest.TestCase):
 
         import database.connection
 
+        mock_pool = MagicMock()
         mock_conn = MagicMock()
-        with patch("mysql.connector.connect", return_value=mock_conn) as mock_connect:
-            with database.connection.get_db_connection() as conn:
+        mock_pool.get_connection.return_value = mock_conn
+
+        with patch("database.connection.get_db_pool", return_value=mock_pool):
+            with database.connection.get_db_connection(use_database=True) as conn:
                 self.assertEqual(conn, mock_conn)
-                mock_connect.assert_called_once()
-                kwargs = mock_connect.call_args[1]
-                self.assertTrue(kwargs.get("use_pure"), "Must use pure-Python driver to bypass Ubuntu C-extension hang")
-                self.assertEqual(kwargs.get("connection_timeout"), 15)
-                self.assertEqual(kwargs.get("read_timeout"), 15)
-                self.assertEqual(kwargs.get("write_timeout"), 15)
-                self.assertTrue(kwargs.get("ssl_verify_cert"))
-                self.assertEqual(kwargs.get("database"), "urbanpulse")
-            # Must close direct connection cleanly on exit
+                mock_pool.get_connection.assert_called_once()
+            # conn.close() returns connection to pool
             mock_conn.close.assert_called_once()
 
     def test_cloud_mode_cursor_failure_path_clean_release(self):
-        """Verifies that query failure in get_db_cursor cleans up cursor and connection without hanging."""
+        """Verifies that query failure in get_db_cursor cleans up cursor and returns connection to pool."""
         settings.URBANPULSE_ENV = "cloud"
         settings.TIDB_HOST = "gateway01.test.tidbcloud.com"
         settings.TIDB_USER = "test_user"
@@ -430,12 +449,14 @@ class TestCloudIngestionArchitecture(unittest.TestCase):
 
         import database.connection
 
+        mock_pool = MagicMock()
         mock_conn = MagicMock()
         mock_cursor = MagicMock()
         mock_cursor.execute.side_effect = Exception("Simulated socket read timeout")
         mock_conn.cursor.return_value = mock_cursor
+        mock_pool.get_connection.return_value = mock_conn
 
-        with patch("mysql.connector.connect", return_value=mock_conn):
+        with patch("database.connection.get_db_pool", return_value=mock_pool):
             with self.assertRaises(Exception) as ctx:
                 with database.connection.get_db_cursor(commit=True) as cursor:
                     cursor.execute("SELECT 1;")
@@ -459,6 +480,40 @@ class TestCloudIngestionArchitecture(unittest.TestCase):
                 mock_ensure.assert_not_called()
                 self.assertIsNotNone(res)
                 self.assertEqual(res["requests_attempted"], 0)
+
+    def test_scheduled_batch_per_stage_timings_reporting(self):
+        """Verifies that live scheduled batch orchestrator measures and returns per-stage timing breakdown."""
+        from scripts.run_scheduled_batch import run_live_scheduled_batch
+
+        with patch("scripts.run_scheduled_batch.check_cadence_guard", return_value=(True, "OK")):
+            with patch("scripts.run_scheduled_batch.get_db_cursor") as mock_cursor_ctx:
+                mock_cursor = MagicMock()
+                mock_cursor.fetchone.return_value = {"cnt": 10}
+                mock_cursor_ctx.return_value.__enter__.return_value = mock_cursor
+
+                with patch("ingestion.traffic.tomtom_client.tomtom_client.ingest_all_corridors", return_value={"successful": 15, "failed": 0}):
+                    with patch("ingestion.weather.weather_client.weather_client.ingest_primary_city", return_value=True):
+                        with patch("ingestion.air_quality.air_quality_client.air_quality_client.ingest_primary_city", return_value=True):
+                            with patch("anomaly_detection.rule_engine.anomaly_engine.evaluate_operational_anomalies", return_value={"anomalies_detected": 0}):
+                                with patch("analytics.traffic_analytics.traffic_analytics.compute_and_store_hourly_metrics"):
+                                    with patch("analytics.environment_analytics.environment_analytics.compute_and_store_daily_metrics"):
+                                        with patch("database.repository.repository.log_pipeline_run"):
+                                            res = run_live_scheduled_batch(force=True)
+                                            self.assertTrue(res["success"])
+                                            self.assertIn("timings", res)
+                                            timings = res["timings"]
+                                            for key in [
+                                                "snapshot_init_sec",
+                                                "traffic_ingestion_sec",
+                                                "weather_ingestion_sec",
+                                                "air_quality_ingestion_sec",
+                                                "anomaly_detection_sec",
+                                                "metric_rollups_sec",
+                                                "snapshot_final_sec",
+                                                "total_batch_sec",
+                                            ]:
+                                                self.assertIn(key, timings)
+                                                self.assertIsInstance(timings[key], float)
 
 
 if __name__ == "__main__":

@@ -92,30 +92,39 @@ def get_db_connection(use_database: bool = True):
             raise ValueError("URBANPULSE_ENV='cloud' prohibits connecting to localhost or using an empty host.")
         if not settings.TIDB_USER or not settings.TIDB_PASSWORD:
             raise ValueError("URBANPULSE_ENV='cloud' requires valid cloud database credentials (TIDB_USER, TIDB_PASSWORD).")
-        conn_params = {
-            "host": target_host,
-            "port": settings.TIDB_PORT,
-            "user": settings.TIDB_USER,
-            "password": settings.TIDB_PASSWORD,
-            "use_pure": True,
-            "connection_timeout": 15,
-            "read_timeout": 15,
-            "write_timeout": 15,
-            "ssl_ca": certifi.where(),
-            "ssl_verify_cert": True,
-            "ssl_verify_identity": True,
-        }
-        if use_database:
-            conn_params["database"] = settings.TIDB_DATABASE or "urbanpulse"
 
-        conn = mysql.connector.connect(**conn_params)
-        try:
-            yield conn
-        finally:
+        if not use_database:
+            conn_params = {
+                "host": target_host,
+                "port": settings.TIDB_PORT,
+                "user": settings.TIDB_USER,
+                "password": settings.TIDB_PASSWORD,
+                "use_pure": True,
+                "connection_timeout": 15,
+                "read_timeout": 15,
+                "write_timeout": 15,
+                "ssl_ca": certifi.where(),
+                "ssl_verify_cert": True,
+                "ssl_verify_identity": True,
+            }
+            conn = mysql.connector.connect(**conn_params)
             try:
-                conn.close()
-            except Exception as close_err:
-                logger.debug(f"Error closing direct TiDB connection: {close_err}")
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception as close_err:
+                    logger.debug(f"Error closing direct TiDB connection: {close_err}")
+        else:
+            pool = get_db_pool()
+            conn = pool.get_connection()
+            try:
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception as close_err:
+                    logger.debug(f"Error returning connection to pool: {close_err}")
     else:
         # Local Mode: connects to local MySQL without SSL
         if not use_database:
@@ -278,4 +287,19 @@ def get_tidb_cursor(commit: bool = False, dictionary: bool = True, use_database:
                     cursor.close()
                 except Exception as c_err:
                     logger.debug(f"Error closing TiDB cursor: {c_err}")
+
+
+def close_all_pools():
+    """
+    Resets any active database connection pools.
+    Useful for clean process teardown and test isolation.
+    """
+    global _connection_pool, _tidb_pool
+    _connection_pool = None
+    _tidb_pool = None
+
+
+import atexit
+atexit.register(close_all_pools)
+
 
