@@ -5,6 +5,7 @@ Loads environment variables and supplies centralized project settings.
 
 import os
 from pathlib import Path
+from typing import Any
 from dotenv import load_dotenv
 
 # Base Directory: root of urbanpulse project
@@ -12,6 +13,44 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Load .env file
 load_dotenv(BASE_DIR / ".env")
+
+
+def _get_config_value(key: str, default: Any = "") -> Any:
+    """
+    Retrieves configuration value, prioritizing os.environ, then falling back to st.secrets.
+    Safe when Streamlit is not installed or when st.secrets is unavailable.
+    """
+    val = os.getenv(key)
+    if val is not None and str(val).strip() != "":
+        return val
+
+    # Fallback to Streamlit secrets if available
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and st.secrets is not None:
+            # 1. Direct match (e.g. TIDB_HOST)
+            if key in st.secrets:
+                sec_val = st.secrets[key]
+                if sec_val is not None and str(sec_val).strip() != "":
+                    return sec_val
+            # 2. Lowercase match (e.g. tidb_host)
+            key_lower = key.lower()
+            if key_lower in st.secrets:
+                sec_val = st.secrets[key_lower]
+                if sec_val is not None and str(sec_val).strip() != "":
+                    return sec_val
+            # 3. Nested [tidb] section match (e.g. [tidb] host = "...")
+            if key.startswith("TIDB_") and "tidb" in st.secrets:
+                tidb_sec = st.secrets["tidb"]
+                sub_key = key[5:].lower()
+                if sub_key in tidb_sec:
+                    sec_val = tidb_sec[sub_key]
+                    if sec_val is not None and str(sec_val).strip() != "":
+                        return sec_val
+    except Exception:
+        pass
+
+    return default
 
 
 class Settings:
@@ -29,8 +68,24 @@ class Settings:
     DEFAULT_LONGITUDE: float = 79.0882
     DEFAULT_TIMEZONE: str = "Asia/Kolkata"
 
+    def __init__(self):
+        self._urbanpulse_env = None
+        self._tidb_host = None
+        self._tidb_port = None
+        self._tidb_user = None
+        self._tidb_password = None
+        self._tidb_database = None
+
     # Explicit Environment Selection: 'local' (default) vs 'cloud'
-    URBANPULSE_ENV: str = os.getenv("URBANPULSE_ENV", "local").lower().strip()
+    @property
+    def URBANPULSE_ENV(self) -> str:
+        if self._urbanpulse_env is not None:
+            return self._urbanpulse_env.lower().strip()
+        return str(_get_config_value("URBANPULSE_ENV", "local")).lower().strip()
+
+    @URBANPULSE_ENV.setter
+    def URBANPULSE_ENV(self, val: str):
+        self._urbanpulse_env = val
 
     @property
     def is_cloud(self) -> bool:
@@ -48,11 +103,55 @@ class Settings:
     MYSQL_DATABASE: str = os.getenv("MYSQL_DATABASE", "urbanpulse")
 
     # TiDB Cloud Configuration (Secure Cloud Operations)
-    TIDB_HOST: str = os.getenv("TIDB_HOST", "")
-    TIDB_PORT: int = int(os.getenv("TIDB_PORT", 4000))
-    TIDB_USER: str = os.getenv("TIDB_USER", "")
-    TIDB_PASSWORD: str = os.getenv("TIDB_PASSWORD", "")
-    TIDB_DATABASE: str = os.getenv("TIDB_DATABASE", "urbanpulse")
+    @property
+    def TIDB_HOST(self) -> str:
+        if self._tidb_host is not None:
+            return self._tidb_host
+        return str(_get_config_value("TIDB_HOST", ""))
+
+    @TIDB_HOST.setter
+    def TIDB_HOST(self, val: str):
+        self._tidb_host = val
+
+    @property
+    def TIDB_PORT(self) -> int:
+        if self._tidb_port is not None:
+            return int(self._tidb_port)
+        return int(_get_config_value("TIDB_PORT", 4000))
+
+    @TIDB_PORT.setter
+    def TIDB_PORT(self, val: Any):
+        self._tidb_port = val
+
+    @property
+    def TIDB_USER(self) -> str:
+        if self._tidb_user is not None:
+            return self._tidb_user
+        return str(_get_config_value("TIDB_USER", ""))
+
+    @TIDB_USER.setter
+    def TIDB_USER(self, val: str):
+        self._tidb_user = val
+
+    @property
+    def TIDB_PASSWORD(self) -> str:
+        if self._tidb_password is not None:
+            return self._tidb_password
+        return str(_get_config_value("TIDB_PASSWORD", ""))
+
+    @TIDB_PASSWORD.setter
+    def TIDB_PASSWORD(self, val: str):
+        self._tidb_password = val
+
+    @property
+    def TIDB_DATABASE(self) -> str:
+        if self._tidb_database is not None:
+            return self._tidb_database
+        return str(_get_config_value("TIDB_DATABASE", "urbanpulse"))
+
+    @TIDB_DATABASE.setter
+    def TIDB_DATABASE(self, val: str):
+        self._tidb_database = val
 
     # Kafka Configuration
     KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
