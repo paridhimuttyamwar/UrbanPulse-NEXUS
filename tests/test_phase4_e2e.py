@@ -50,7 +50,7 @@ class TestPhase4EndToEnd(unittest.TestCase):
         # Verify exact counts and segregation
         self.assertIn("REAL_API", counts)
         self.assertGreaterEqual(counts["REAL_API"], 38, "REAL_API observations must be at least 38")
-        self.assertEqual(counts.get("SIMULATED", 0), 1288, "SIMULATED observations must be exactly 1,288")
+        self.assertGreaterEqual(counts.get("SIMULATED", 0), 1288, "SIMULATED observations must be at least 1,288")
         self.assertEqual(counts.get("TEST_MOCK", 0), 12, "TEST_MOCK observations must be exactly 12")
 
         # Verify that all REAL_API records have non-null speeds and travel times

@@ -39,7 +39,10 @@ def get_db_pool():
                     "pool_name": "urbanpulse_cloud_pool",
                     "pool_size": 5,
                     "pool_reset_session": False,
+                    "use_pure": True,
                     "connection_timeout": 15,
+                    "read_timeout": 15,
+                    "write_timeout": 15,
                     "host": target_host,
                     "port": port,
                     "user": user,
@@ -78,27 +81,44 @@ def get_db_pool():
 @contextmanager
 def get_db_connection(use_database: bool = True):
     """
-    Context manager yielding a database connection.
-    If use_database is False, connects to server without selecting a DB.
+    Context manager yielding an authenticated database connection.
+    In cloud mode (TiDB Cloud): creates a direct pure-Python connection with verified TLS,
+    finite socket read/write/connect timeouts (15s), and clean disconnection, avoiding pool-specific hangs.
+    In local mode: connects to local MySQL (using connection pool for DB queries).
     """
-    if not use_database:
-        if settings.is_cloud:
-            target_host = settings.TIDB_HOST
-            if not target_host or target_host in ("localhost", "127.0.0.1"):
-                raise ValueError("URBANPULSE_ENV='cloud' prohibits connecting to localhost or using an empty host.")
-            if not settings.TIDB_USER or not settings.TIDB_PASSWORD:
-                raise ValueError("URBANPULSE_ENV='cloud' requires valid cloud database credentials (TIDB_USER, TIDB_PASSWORD).")
-            conn = mysql.connector.connect(
-                host=target_host,
-                port=settings.TIDB_PORT,
-                user=settings.TIDB_USER,
-                password=settings.TIDB_PASSWORD,
-                connection_timeout=15,
-                ssl_ca=certifi.where(),
-                ssl_verify_cert=True,
-                ssl_verify_identity=True,
-            )
-        else:
+    if settings.is_cloud:
+        target_host = settings.TIDB_HOST
+        if not target_host or target_host in ("localhost", "127.0.0.1"):
+            raise ValueError("URBANPULSE_ENV='cloud' prohibits connecting to localhost or using an empty host.")
+        if not settings.TIDB_USER or not settings.TIDB_PASSWORD:
+            raise ValueError("URBANPULSE_ENV='cloud' requires valid cloud database credentials (TIDB_USER, TIDB_PASSWORD).")
+        conn_params = {
+            "host": target_host,
+            "port": settings.TIDB_PORT,
+            "user": settings.TIDB_USER,
+            "password": settings.TIDB_PASSWORD,
+            "use_pure": True,
+            "connection_timeout": 15,
+            "read_timeout": 15,
+            "write_timeout": 15,
+            "ssl_ca": certifi.where(),
+            "ssl_verify_cert": True,
+            "ssl_verify_identity": True,
+        }
+        if use_database:
+            conn_params["database"] = settings.TIDB_DATABASE or "urbanpulse"
+
+        conn = mysql.connector.connect(**conn_params)
+        try:
+            yield conn
+        finally:
+            try:
+                conn.close()
+            except Exception as close_err:
+                logger.debug(f"Error closing direct TiDB connection: {close_err}")
+    else:
+        # Local Mode: connects to local MySQL without SSL
+        if not use_database:
             conn = mysql.connector.connect(
                 host=settings.MYSQL_HOST,
                 port=settings.MYSQL_PORT,
@@ -106,23 +126,23 @@ def get_db_connection(use_database: bool = True):
                 password=settings.MYSQL_PASSWORD,
                 connection_timeout=15,
             )
-        try:
-            yield conn
-        finally:
             try:
-                conn.close()
-            except Exception as close_err:
-                logger.debug(f"Error closing unpooled connection: {close_err}")
-    else:
-        pool = get_db_pool()
-        conn = pool.get_connection()
-        try:
-            yield conn
-        finally:
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception as close_err:
+                    logger.debug(f"Error closing unpooled connection: {close_err}")
+        else:
+            pool = get_db_pool()
+            conn = pool.get_connection()
             try:
-                conn.close()
-            except Exception as close_err:
-                logger.debug(f"Error returning connection to pool: {close_err}")
+                yield conn
+            finally:
+                try:
+                    conn.close()
+                except Exception as close_err:
+                    logger.debug(f"Error returning connection to pool: {close_err}")
 
 
 @contextmanager
@@ -185,7 +205,10 @@ def get_tidb_pool():
                 "pool_name": "urbanpulse_tidb_pool",
                 "pool_size": 5,
                 "pool_reset_session": False,
+                "use_pure": True,
                 "connection_timeout": 15,
+                "read_timeout": 15,
+                "write_timeout": 15,
                 "host": settings.TIDB_HOST,
                 "port": settings.TIDB_PORT,
                 "user": settings.TIDB_USER,
@@ -213,7 +236,10 @@ def get_tidb_connection(use_database: bool = True):
         "port": settings.TIDB_PORT,
         "user": settings.TIDB_USER,
         "password": settings.TIDB_PASSWORD,
+        "use_pure": True,
         "connection_timeout": 15,
+        "read_timeout": 15,
+        "write_timeout": 15,
     }
     if use_database:
         conn_params["database"] = settings.TIDB_DATABASE

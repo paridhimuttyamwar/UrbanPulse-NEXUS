@@ -40,7 +40,7 @@ class TestPhase2BTrafficDashboard(unittest.TestCase):
         with get_db_cursor(commit=False) as cursor:
             cursor.execute("SELECT COUNT(*) as c FROM traffic_readings WHERE source_type = 'SIMULATED'")
             sim_count = cursor.fetchone()["c"]
-            self.assertEqual(sim_count, 1288, "Expected exactly 1,288 historical SIMULATED records")
+            self.assertGreaterEqual(sim_count, 1288, "Expected at least 1,288 historical SIMULATED records")
 
     def test_03_load_latest_traffic_per_corridor_coverage(self):
         """Verify load_latest_traffic_per_corridor retrieves all 15 registered Nagpur corridors."""

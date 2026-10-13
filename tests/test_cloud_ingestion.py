@@ -356,7 +356,7 @@ class TestCloudIngestionArchitecture(unittest.TestCase):
         self.assertLess(events.index("transaction_committed"), events.index("http_get_dispatched"))
 
     def test_cloud_connection_pool_hang_protection(self):
-        """Verifies that cloud connection pool disables pool_reset_session and sets connection_timeout."""
+        """Verifies that cloud connection pool disables pool_reset_session and sets finite timeouts with use_pure=True."""
         settings.URBANPULSE_ENV = "cloud"
         settings.TIDB_HOST = "gateway01.test.tidbcloud.com"
         settings.TIDB_USER = "test_user"
@@ -370,8 +370,59 @@ class TestCloudIngestionArchitecture(unittest.TestCase):
             mock_pool_cls.assert_called_once()
             called_kwargs = mock_pool_cls.call_args[1]
             self.assertFalse(called_kwargs.get("pool_reset_session"), "pool_reset_session must be False to avoid TiDB COM_RESET_CONNECTION hang")
+            self.assertTrue(called_kwargs.get("use_pure"), "use_pure must be True to prevent C-extension SSL deadlock on Ubuntu")
             self.assertEqual(called_kwargs.get("connection_timeout"), 15, "connection_timeout must be bounded to 15s")
+            self.assertEqual(called_kwargs.get("read_timeout"), 15, "read_timeout must be bounded to 15s")
+            self.assertEqual(called_kwargs.get("write_timeout"), 15, "write_timeout must be bounded to 15s")
             self.assertTrue(called_kwargs.get("ssl_verify_cert"), "ssl_verify_cert must be True")
+
+    def test_cloud_mode_direct_pure_python_connection(self):
+        """Verifies get_db_connection() in cloud mode creates direct pure-Python connection with bounded timeouts."""
+        settings.URBANPULSE_ENV = "cloud"
+        settings.TIDB_HOST = "gateway01.test.tidbcloud.com"
+        settings.TIDB_USER = "test_user"
+        settings.TIDB_PASSWORD = "test_password"
+        settings.TIDB_DATABASE = "urbanpulse"
+
+        import database.connection
+
+        mock_conn = MagicMock()
+        with patch("mysql.connector.connect", return_value=mock_conn) as mock_connect:
+            with database.connection.get_db_connection() as conn:
+                self.assertEqual(conn, mock_conn)
+                mock_connect.assert_called_once()
+                kwargs = mock_connect.call_args[1]
+                self.assertTrue(kwargs.get("use_pure"), "Must use pure-Python driver to bypass Ubuntu C-extension hang")
+                self.assertEqual(kwargs.get("connection_timeout"), 15)
+                self.assertEqual(kwargs.get("read_timeout"), 15)
+                self.assertEqual(kwargs.get("write_timeout"), 15)
+                self.assertTrue(kwargs.get("ssl_verify_cert"))
+                self.assertEqual(kwargs.get("database"), "urbanpulse")
+            # Must close direct connection cleanly on exit
+            mock_conn.close.assert_called_once()
+
+    def test_cloud_mode_cursor_failure_path_clean_release(self):
+        """Verifies that query failure in get_db_cursor cleans up cursor and connection without hanging."""
+        settings.URBANPULSE_ENV = "cloud"
+        settings.TIDB_HOST = "gateway01.test.tidbcloud.com"
+        settings.TIDB_USER = "test_user"
+        settings.TIDB_PASSWORD = "test_password"
+
+        import database.connection
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.execute.side_effect = Exception("Simulated socket read timeout")
+        mock_conn.cursor.return_value = mock_cursor
+
+        with patch("mysql.connector.connect", return_value=mock_conn):
+            with self.assertRaises(Exception) as ctx:
+                with database.connection.get_db_cursor(commit=True) as cursor:
+                    cursor.execute("SELECT 1;")
+            self.assertIn("Simulated socket read timeout", str(ctx.exception))
+            mock_conn.rollback.assert_called_once()
+            mock_cursor.close.assert_called_once()
+            mock_conn.close.assert_called_once()
 
     def test_durable_state_load_never_executes_ddl(self):
         """Verifies that _load_durable_state is strictly read-only and never runs _ensure_durable_table DDL."""

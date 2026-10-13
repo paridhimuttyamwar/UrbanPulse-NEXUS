@@ -32,6 +32,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
 )
+logging.getLogger("mysql.connector").setLevel(logging.WARNING)
 logger = logging.getLogger("ScheduledBatch")
 
 
@@ -105,15 +106,25 @@ def run_dry_run_validation() -> bool:
     print("\n[Check 2/5] Testing Database Connectivity & TLS Verification...", flush=True)
     t0 = time.time()
     try:
+        print(" -> [Step 2.1] Acquiring database connection & cursor...", flush=True)
         with get_db_cursor(commit=False) as cursor:
+            print(" -> [Step 2.1 OK] Database connection & cursor acquired.", flush=True)
+
+            print(" -> [Step 2.2] Executing: SELECT DATABASE() AS db, VERSION() AS ver;...", flush=True)
             cursor.execute("SELECT DATABASE() AS db, VERSION() AS ver;")
+            print(" -> [Step 2.2 OK] Query executed. Fetching database metadata...", flush=True)
             db_info = cursor.fetchone()
             elapsed_conn = time.time() - t0
             print(f" [OK] Database connected in {elapsed_conn:.2f}s: '{db_info['db']}', Version: {db_info['ver']}", flush=True)
-            
+
+            print(" -> [Step 2.3] Executing: SHOW TABLES;...", flush=True)
             cursor.execute("SHOW TABLES;")
+            print(" -> [Step 2.3 OK] Query executed. Fetching table list...", flush=True)
             tables = [list(r.values())[0] for r in cursor.fetchall()]
             print(f" [OK] Available tables: {len(tables)} tables verified.", flush=True)
+
+            print(" -> [Step 2.4] Exiting cursor context and releasing connection...", flush=True)
+        print(" -> [Step 2.4 OK] Cursor closed and connection cleanly released.", flush=True)
     except Exception as e:
         elapsed_conn = time.time() - t0
         print(f" [FAIL] Database connection failed after {elapsed_conn:.2f}s: {e}", flush=True)
@@ -132,7 +143,9 @@ def run_dry_run_validation() -> bool:
     t1 = time.time()
     try:
         from ingestion.traffic.tomtom_client import tomtom_client
+        print(" -> [Step 4.1] Reading durable quota state from database...", flush=True)
         usage = tomtom_client.budget_tracker.get_usage()
+        print(" -> [Step 4.2] Evaluating TomTom budget policy...", flush=True)
         can_req, budget_msg = tomtom_client.budget_tracker.can_request()
         elapsed_quota = time.time() - t1
         print(f" -> Month: {usage.get('month')}", flush=True)

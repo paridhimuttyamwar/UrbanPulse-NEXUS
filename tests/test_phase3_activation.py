@@ -114,6 +114,7 @@ class TestPhase3Activation(unittest.TestCase):
         client = TomTomTrafficClient(api_key="MOCK_TEST_KEY")
         client.budget_tracker = MagicMock()
         client.budget_tracker.can_request.return_value = (True, "OK")
+        client.budget_tracker.reserve_request.return_value = (True, "OK")
 
         with patch("ingestion.traffic.tomtom_client.repository"), \
              patch("ingestion.traffic.tomtom_client.archiver"):
@@ -143,6 +144,7 @@ class TestPhase3Activation(unittest.TestCase):
         client = TomTomTrafficClient(api_key="MOCK_TEST_KEY")
         client.budget_tracker = MagicMock()
         client.budget_tracker.can_request.return_value = (True, "OK")
+        client.budget_tracker.reserve_request.return_value = (True, "OK")
 
         with patch("ingestion.traffic.tomtom_client.repository"), \
              patch("ingestion.traffic.tomtom_client.archiver"), \
