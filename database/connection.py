@@ -38,7 +38,8 @@ def get_db_pool():
                 pool_config = {
                     "pool_name": "urbanpulse_cloud_pool",
                     "pool_size": 5,
-                    "pool_reset_session": True,
+                    "pool_reset_session": False,
+                    "connection_timeout": 15,
                     "host": target_host,
                     "port": port,
                     "user": user,
@@ -60,6 +61,7 @@ def get_db_pool():
                     pool_name="urbanpulse_local_pool",
                     pool_size=5,
                     pool_reset_session=True,
+                    connection_timeout=15,
                     host=settings.MYSQL_HOST,
                     port=settings.MYSQL_PORT,
                     user=settings.MYSQL_USER,
@@ -91,6 +93,7 @@ def get_db_connection(use_database: bool = True):
                 port=settings.TIDB_PORT,
                 user=settings.TIDB_USER,
                 password=settings.TIDB_PASSWORD,
+                connection_timeout=15,
                 ssl_ca=certifi.where(),
                 ssl_verify_cert=True,
                 ssl_verify_identity=True,
@@ -101,18 +104,25 @@ def get_db_connection(use_database: bool = True):
                 port=settings.MYSQL_PORT,
                 user=settings.MYSQL_USER,
                 password=settings.MYSQL_PASSWORD,
+                connection_timeout=15,
             )
         try:
             yield conn
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except Exception as close_err:
+                logger.debug(f"Error closing unpooled connection: {close_err}")
     else:
         pool = get_db_pool()
         conn = pool.get_connection()
         try:
             yield conn
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except Exception as close_err:
+                logger.debug(f"Error returning connection to pool: {close_err}")
 
 
 @contextmanager
@@ -121,18 +131,26 @@ def get_db_cursor(commit: bool = False, dictionary: bool = True):
     Context manager yielding a cursor and handling commit/rollback.
     """
     with get_db_connection() as conn:
-        cursor = conn.cursor(dictionary=dictionary, buffered=True)
+        cursor = None
         try:
+            cursor = conn.cursor(dictionary=dictionary, buffered=True)
             yield cursor
             if commit:
                 conn.commit()
         except Exception as e:
             if commit:
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except Exception as rb_err:
+                    logger.warning(f"Failed to rollback transaction: {rb_err}")
             logger.error(f"Database error during cursor execution: {e}")
             raise
         finally:
-            cursor.close()
+            if cursor:
+                try:
+                    cursor.close()
+                except Exception as c_err:
+                    logger.debug(f"Error closing cursor: {c_err}")
 
 
 # ==========================================
@@ -166,7 +184,8 @@ def get_tidb_pool():
             pool_config = {
                 "pool_name": "urbanpulse_tidb_pool",
                 "pool_size": 5,
-                "pool_reset_session": True,
+                "pool_reset_session": False,
+                "connection_timeout": 15,
                 "host": settings.TIDB_HOST,
                 "port": settings.TIDB_PORT,
                 "user": settings.TIDB_USER,
@@ -194,6 +213,7 @@ def get_tidb_connection(use_database: bool = True):
         "port": settings.TIDB_PORT,
         "user": settings.TIDB_USER,
         "password": settings.TIDB_PASSWORD,
+        "connection_timeout": 15,
     }
     if use_database:
         conn_params["database"] = settings.TIDB_DATABASE
@@ -202,22 +222,34 @@ def get_tidb_connection(use_database: bool = True):
     try:
         yield conn
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception as close_err:
+            logger.debug(f"Error closing TiDB connection: {close_err}")
 
 
 @contextmanager
 def get_tidb_cursor(commit: bool = False, dictionary: bool = True, use_database: bool = True):
     """Context manager yielding a cursor for TiDB Cloud queries."""
     with get_tidb_connection(use_database=use_database) as conn:
-        cursor = conn.cursor(dictionary=dictionary, buffered=True)
+        cursor = None
         try:
+            cursor = conn.cursor(dictionary=dictionary, buffered=True)
             yield cursor
             if commit:
                 conn.commit()
         except Exception as e:
             if commit:
-                conn.rollback()
+                try:
+                    conn.rollback()
+                except Exception as rb_err:
+                    logger.warning(f"Failed to rollback TiDB transaction: {rb_err}")
             logger.error(f"TiDB error during cursor execution: {e}")
             raise
         finally:
-            cursor.close()
+            if cursor:
+                try:
+                    cursor.close()
+                except Exception as c_err:
+                    logger.debug(f"Error closing TiDB cursor: {c_err}")
+

@@ -355,6 +355,41 @@ class TestCloudIngestionArchitecture(unittest.TestCase):
         self.assertIn("http_get_dispatched", events)
         self.assertLess(events.index("transaction_committed"), events.index("http_get_dispatched"))
 
+    def test_cloud_connection_pool_hang_protection(self):
+        """Verifies that cloud connection pool disables pool_reset_session and sets connection_timeout."""
+        settings.URBANPULSE_ENV = "cloud"
+        settings.TIDB_HOST = "gateway01.test.tidbcloud.com"
+        settings.TIDB_USER = "test_user"
+        settings.TIDB_PASSWORD = "test_password"
+
+        import database.connection
+        database.connection._connection_pool = None
+
+        with patch("mysql.connector.pooling.MySQLConnectionPool") as mock_pool_cls:
+            database.connection.get_db_pool()
+            mock_pool_cls.assert_called_once()
+            called_kwargs = mock_pool_cls.call_args[1]
+            self.assertFalse(called_kwargs.get("pool_reset_session"), "pool_reset_session must be False to avoid TiDB COM_RESET_CONNECTION hang")
+            self.assertEqual(called_kwargs.get("connection_timeout"), 15, "connection_timeout must be bounded to 15s")
+            self.assertTrue(called_kwargs.get("ssl_verify_cert"), "ssl_verify_cert must be True")
+
+    def test_durable_state_load_never_executes_ddl(self):
+        """Verifies that _load_durable_state is strictly read-only and never runs _ensure_durable_table DDL."""
+        client = TomTomTrafficClient(api_key="TEST_KEY")
+        tracker = client.budget_tracker
+
+        with patch.object(tracker, "_ensure_durable_table") as mock_ensure:
+            with patch("database.connection.get_db_cursor") as mock_cursor_ctx:
+                mock_cursor = MagicMock()
+                mock_cursor.fetchone.return_value = None
+                mock_cursor_ctx.return_value.__enter__.return_value = mock_cursor
+
+                res = tracker._load_durable_state("2026-10")
+                mock_ensure.assert_not_called()
+                self.assertIsNotNone(res)
+                self.assertEqual(res["requests_attempted"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+

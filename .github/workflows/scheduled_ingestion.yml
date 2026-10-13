@@ -73,6 +73,7 @@ jobs:
         if: steps.activation_check.outputs.paused != 'true'
         env:
           URBANPULSE_ENV: cloud
+          PYTHONUNBUFFERED: "1"
           TIDB_HOST: ${{ secrets.TIDB_HOST }}
           TIDB_PORT: ${{ secrets.TIDB_PORT || 4000 }}
           TIDB_USER: ${{ secrets.TIDB_USER }}

@@ -171,11 +171,10 @@ class TomTomBudgetTracker:
             logger.debug(f"Note on ensure_durable_table: {e}")
 
     def _load_durable_state(self, current_month: str) -> Optional[Dict[str, Any]]:
-        """Queries durable database storage for current month quota accounting."""
+        """Queries durable database storage for current month quota accounting (strictly read-only)."""
         if self.is_custom_state_file:
             return None
         try:
-            self._ensure_durable_table()
             from database.connection import get_db_cursor
             with get_db_cursor(commit=False) as cursor:
                 cursor.execute(
@@ -200,7 +199,7 @@ class TomTomBudgetTracker:
                     "last_request_timestamp": None,
                 }
         except Exception as e:
-            logger.error(f"Durable quota lookup failed: {e}")
+            logger.debug(f"Durable quota lookup (read-only): {e}")
             return None
 
     def _reserve_durable_slot(self, current_month: str) -> Tuple[bool, str, int]:

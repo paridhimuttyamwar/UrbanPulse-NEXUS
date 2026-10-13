@@ -80,87 +80,94 @@ def run_dry_run_validation() -> bool:
     - Verifies all Python imports and analytical modules
     - Writes ZERO records and makes ZERO paid API calls.
     """
-    print("\n" + "=" * 75)
-    print("URBANPULSE NEXUS — SCHEDULED INGESTION DRY-RUN VERIFICATION")
-    print("=" * 75)
+    import time
+    print("\n" + "=" * 75, flush=True)
+    print("URBANPULSE NEXUS — SCHEDULED INGESTION DRY-RUN VERIFICATION", flush=True)
+    print("=" * 75, flush=True)
 
     all_passed = True
 
     # 1. Environment & Target Verification
     env_name = settings.URBANPULSE_ENV.upper()
-    print(f"\n[Check 1/5] Active Environment Selection: {env_name}")
+    print(f"\n[Check 1/5] Active Environment Selection: {env_name}", flush=True)
     if settings.is_cloud:
-        print(" -> Mode: CLOUD (Production Target: TiDB Cloud Serverless)")
+        print(" -> Mode: CLOUD (Production Target: TiDB Cloud Serverless)", flush=True)
         if not settings.TIDB_HOST or settings.TIDB_HOST in ("localhost", "127.0.0.1"):
-            print(" [FAIL] Cloud mode requires a remote TiDB host. Localhost is prohibited in cloud mode.")
+            print(" [FAIL] Cloud mode requires a remote TiDB host. Localhost is prohibited in cloud mode.", flush=True)
             all_passed = False
         else:
-            print(" [OK] Remote TiDB host verified. Localhost fallback prohibited.")
+            print(" [OK] Remote TiDB host verified. Localhost fallback prohibited.", flush=True)
     else:
-        print(" -> Mode: LOCAL (Development Target: Local MySQL 8.0 on localhost)")
-        print(" [OK] Local development mode active. Cloud credentials isolated.")
+        print(" -> Mode: LOCAL (Development Target: Local MySQL 8.0 on localhost)", flush=True)
+        print(" [OK] Local development mode active. Cloud credentials isolated.", flush=True)
 
     # 2. Database Connectivity & TLS Check
-    print("\n[Check 2/5] Testing Database Connectivity & TLS Verification:")
+    print("\n[Check 2/5] Testing Database Connectivity & TLS Verification...", flush=True)
+    t0 = time.time()
     try:
         with get_db_cursor(commit=False) as cursor:
             cursor.execute("SELECT DATABASE() AS db, VERSION() AS ver;")
             db_info = cursor.fetchone()
-            print(f" [OK] Database connected: '{db_info['db']}', Version: {db_info['ver']}")
+            elapsed_conn = time.time() - t0
+            print(f" [OK] Database connected in {elapsed_conn:.2f}s: '{db_info['db']}', Version: {db_info['ver']}", flush=True)
             
             cursor.execute("SHOW TABLES;")
             tables = [list(r.values())[0] for r in cursor.fetchall()]
-            print(f" [OK] Available tables: {len(tables)}/13 verified.")
+            print(f" [OK] Available tables: {len(tables)} tables verified.", flush=True)
     except Exception as e:
-        print(f" [FAIL] Database connection failed: {e}")
+        elapsed_conn = time.time() - t0
+        print(f" [FAIL] Database connection failed after {elapsed_conn:.2f}s: {e}", flush=True)
         all_passed = False
 
     # 3. Corridor Registry Audit
-    print("\n[Check 3/5] Verifying Monitored Traffic Corridors:")
+    print("\n[Check 3/5] Verifying Monitored Traffic Corridors...", flush=True)
     approved = get_approved_corridors()
-    print(f" [OK] Verified {len(approved)} registered Nagpur corridors in registry.")
+    print(f" [OK] Verified {len(approved)} registered Nagpur corridors in registry.", flush=True)
     if len(approved) != 15:
-        print(f" [FAIL] Expected 15 approved corridors, found {len(approved)}.")
+        print(f" [FAIL] Expected 15 approved corridors, found {len(approved)}.", flush=True)
         all_passed = False
 
     # 4. Durable TomTom Budget Tracker Audit
-    print("\n[Check 4/5] Checking Durable TomTom API Quota Tracker:")
+    print("\n[Check 4/5] Checking Durable TomTom API Quota Tracker...", flush=True)
+    t1 = time.time()
     try:
         from ingestion.traffic.tomtom_client import tomtom_client
         usage = tomtom_client.budget_tracker.get_usage()
         can_req, budget_msg = tomtom_client.budget_tracker.can_request()
-        print(f" -> Month: {usage.get('month')}")
-        print(f" -> Attempted: {usage.get('requests_attempted')}/{usage.get('effective_limit')} (Absolute: {usage.get('monthly_budget')})")
-        print(f" -> Safety Margin: {usage.get('safety_margin')} requests")
-        print(f" -> Durable DB Synced: {usage.get('durable_synced')}")
-        print(f" -> Budget Status: {budget_msg}")
+        elapsed_quota = time.time() - t1
+        print(f" -> Month: {usage.get('month')}", flush=True)
+        print(f" -> Attempted: {usage.get('requests_attempted')}/{usage.get('effective_limit')} (Absolute: {usage.get('monthly_budget')})", flush=True)
+        print(f" -> Safety Margin: {usage.get('safety_margin')} requests", flush=True)
+        print(f" -> Durable DB Synced: {usage.get('durable_synced')} ({elapsed_quota:.2f}s)", flush=True)
+        print(f" -> Budget Status: {budget_msg}", flush=True)
         if not can_req:
-            print(f" [WARNING] TomTom budget cutoff engaged: {budget_msg}")
+            print(f" [WARNING] TomTom budget cutoff engaged: {budget_msg}", flush=True)
         else:
-            print(" [OK] Budget tracker operational and permits execution.")
+            print(" [OK] Budget tracker operational and permits execution.", flush=True)
     except Exception as e:
-        print(f" [FAIL] Budget tracker audit failed: {e}")
+        elapsed_quota = time.time() - t1
+        print(f" [FAIL] Budget tracker audit failed after {elapsed_quota:.2f}s: {e}", flush=True)
         all_passed = False
 
     # 5. Analytical Engine Imports
-    print("\n[Check 5/5] Verifying Ingestion & Analytical Engines:")
+    print("\n[Check 5/5] Verifying Ingestion & Analytical Engines...", flush=True)
     try:
         from ingestion.weather.weather_client import weather_client
         from ingestion.air_quality.air_quality_client import air_quality_client
         from anomaly_detection.rule_engine import anomaly_engine
         from analytics.traffic_analytics import traffic_analytics
         from analytics.environment_analytics import environment_analytics
-        print(" [OK] All ingestion, validation, anomaly, and rollup engines loaded.")
+        print(" [OK] All ingestion, validation, anomaly, and rollup engines loaded.", flush=True)
     except Exception as e:
-        print(f" [FAIL] Engine import failed: {e}")
+        print(f" [FAIL] Engine import failed: {e}", flush=True)
         all_passed = False
 
-    print("\n" + "=" * 75)
+    print("\n" + "=" * 75, flush=True)
     if all_passed:
-        print(" [SUCCESS] DRY-RUN PASSED! Zero API requests made. Zero database rows written.")
+        print(" [SUCCESS] DRY-RUN PASSED! Zero API requests made. Zero database rows written.", flush=True)
     else:
-        print(" [FAILED] DRY-RUN IDENTIFIED ISSUES. Inspect errors above.")
-    print("=" * 75)
+        print(" [FAILED] DRY-RUN IDENTIFIED ISSUES. Inspect errors above.", flush=True)
+    print("=" * 75, flush=True)
 
     return all_passed
 
