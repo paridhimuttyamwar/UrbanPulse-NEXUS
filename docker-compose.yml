@@ -1,0 +1,85 @@
+# UrbanPulse Docker Compose
+# Configured for low-resource environments (Windows 11, 12GB RAM)
+# Services are partitioned by profiles so Kafka and Airflow run independently.
+
+services:
+  # ==========================================
+  # APACHE KAFKA (Single-Node KRaft Mode)
+  # Profile: kafka
+  # Resource Limit: 512MB RAM
+  # ==========================================
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: urbanpulse_kafka
+    profiles: ["kafka"]
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms256M"
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+
+  # Kafka Topic Creator (runs once then terminates)
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: urbanpulse_kafka_init
+    profiles: ["kafka"]
+    depends_on:
+      - kafka
+    entrypoint: [ "bash", "-c" ]
+    command: |
+      "
+      # Wait for Kafka broker
+      cub kafka-ready -b kafka:29092 1 30
+      # Create required topics
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic urbanpulse.traffic.raw --partitions 1 --replication-factor 1
+      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic urbanpulse.iot.raw --partitions 1 --replication-factor 1
+      echo 'Kafka topics initialized.'
+      "
+
+  # ==========================================
+  # APACHE AIRFLOW (Minimal Standalone)
+  # Profile: airflow
+  # Resource Limit: 1.5GB RAM
+  # Uses local SQLite / SequentialExecutor for minimal footprint
+  # ==========================================
+  airflow:
+    image: apache/airflow:2.8.1-python3.11
+    container_name: urbanpulse_airflow
+    profiles: ["airflow"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./logs/airflow:/opt/airflow/logs
+      - .:/opt/airflow/urbanpulse
+    environment:
+      - MYSQL_HOST=192.168.65.254
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__EXECUTOR=SequentialExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+      - _AIRFLOW_DB_MIGRATE=true
+      - _AIRFLOW_WWW_USER_CREATE=true
+      - _AIRFLOW_WWW_USER_USERNAME=admin
+      - _AIRFLOW_WWW_USER_PASSWORD=admin
+    command: standalone
+    deploy:
+      resources:
+        limits:
+          memory: 1536M

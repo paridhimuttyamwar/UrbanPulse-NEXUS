@@ -1,0 +1,20 @@
+# Core Data & Ingestion
+requests>=2.31.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Database
+mysql-connector-python>=8.0.33
+
+# Streaming & Serial Gateway
+kafka-python-ng>=2.2.2
+pyserial>=3.5
+
+# Dashboard & Visualization
+streamlit>=1.30.0
+plotly>=5.18.0
+
+# Testing & Quality
+pytest>=7.4.0

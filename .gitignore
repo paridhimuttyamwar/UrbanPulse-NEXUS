@@ -1,0 +1,74 @@
+# ==============================================================================
+# UrbanPulse NEXUS — Git Ignore Configuration
+# ==============================================================================
+
+# Environment, secrets, and credentials
+.env
+*.env.local
+*.env.*.local
+.streamlit/secrets.toml
+
+# Python bytecode, cache, and packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Logs, PID files, and runtime state
+logs/
+*.log
+*.pid
+
+# Local raw, processed, and rejected data files (preserve directory placeholders)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/rejected/*
+!data/rejected/.gitkeep
+
+# Runtime state and tracker files
+data/gateway_state.json
+data/tomtom_usage_state.json
+*.json.tmp
+
+# Database backups, dumps, and scratch files
+backup_*.sql
+/*.sql
+*.sql.bak
+*.sql.gz
+*.dump
+scratch/
+
+# IDE, OS, and editor metadata
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+Desktop.ini
+.DS_Store
+
